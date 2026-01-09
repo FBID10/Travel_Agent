@@ -98,7 +98,7 @@ async def travel_advice(request: TravelRequest):
     # Step 3: Ask Gemini
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash", # Updated to a widely available model
+            model="gemini-2.5-flash",
             contents=prompt
         )
         advice = response.text
