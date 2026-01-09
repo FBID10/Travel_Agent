@@ -13,19 +13,22 @@ load_dotenv()
 AI_INTEGRATIONS_GEMINI_API_KEY = os.environ.get("AI_INTEGRATIONS_GEMINI_API_KEY")
 AI_INTEGRATIONS_GEMINI_BASE_URL = os.environ.get("AI_INTEGRATIONS_GEMINI_BASE_URL")
 
+# Initialize the Gemini Client
 client = genai.Client(
     api_key=AI_INTEGRATIONS_GEMINI_API_KEY,
     http_options={
-        'api_version': '',
+        'api_version': 'v1beta',
         'base_url': AI_INTEGRATIONS_GEMINI_BASE_URL   
     }
 )
 
 app = FastAPI()
 
+# --- Data Models ---
 class TravelRequest(BaseModel):
     destination: str
 
+# --- Helper Function ---
 def get_weather_data(city_name: str):
     """Fetches weather data from Open-Meteo."""
     try:
@@ -34,13 +37,14 @@ def get_weather_data(city_name: str):
         geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_quoted}&count=1&language=en&format=json"
         geo_res = requests.get(geo_url).json()
         print(f"DEBUG: Geocoding response for {city_name}: {geo_res}")
+        
         if not geo_res.get("results"):
             return None
         
         location = geo_res["results"][0]
         lat, lon = location["latitude"], location["longitude"]
         
-        # 2. Weather Forecast
+        # 2. Weather Forecast (Daily)
         weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto"
         weather_res = requests.get(weather_url).json()
         print(f"DEBUG: Weather response: {weather_res}")
@@ -48,6 +52,7 @@ def get_weather_data(city_name: str):
         if "daily" not in weather_res:
             return None
             
+        # Parse today's forecast (Index 0)
         temp_max = weather_res["daily"]["temperature_2m_max"][0]
         temp_min = weather_res["daily"]["temperature_2m_min"][0]
         precip_prob = weather_res["daily"]["precipitation_probability_max"][0]
@@ -63,6 +68,51 @@ def get_weather_data(city_name: str):
         print(f"DEBUG: Exception in get_weather_data: {e}")
         return None
 
+# --- NEW ENDPOINT: Get Raw Weather Data ---
+@app.get("/weather/{city}")
+def get_weather_endpoint(city: str):
+    """Fetches raw weather data without AI advice."""
+    data = get_weather_data(city)
+    if not data:
+        raise HTTPException(status_code=404, detail="City not found")
+    return data
+
+# --- ENDPOINT: Get AI Travel Advice ---
+@app.post("/travel_advice")
+async def travel_advice(request: TravelRequest):
+    # Step 1: Call get_weather_data
+    weather_data = get_weather_data(request.destination)
+    if not weather_data:
+        raise HTTPException(status_code=404, detail="Weather data not found for destination")
+    
+    # Step 2: Construct prompt
+    weather_info = (f"Destination: {weather_data['city']}, {weather_data['country']}. "
+                    f"Forecast: Max {weather_data['temp_max']}°C, Min {weather_data['temp_min']}°C, "
+                    f"Precipitation Probability: {weather_data['precip_prob']}%.")
+    
+    prompt = (f"Act as a Travel Advisor. Based on the following destination and weather info, "
+              f"provide clothing and travel recommendations. Do NOT use asterisks for bolding. "
+              f"Instead, put the topic at the start of the line, followed by a relevant emoji, "
+              f"then the description. Use clear headings (using ###):\n\n{weather_info}")
+    
+    # Step 3: Ask Gemini
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.0-flash", # Updated to a widely available model
+            contents=prompt
+        )
+        advice = response.text
+    except Exception as e:
+        print(f"AI Error: {e}")
+        raise HTTPException(status_code=500, detail=f"AI Agent error: {str(e)}")
+    
+    # Step 4: Return JSON
+    return {
+        "advice": advice,
+        "weather": weather_data
+    }
+
+# --- Frontend (HTML) ---
 @app.get("/", response_class=HTMLResponse)
 def read_root():
     return """
@@ -301,37 +351,3 @@ def read_root():
     </body>
     </html>
     """
-
-@app.post("/travel_advice")
-async def travel_advice(request: TravelRequest):
-    # Step 1: Call get_weather_data
-    weather_data = get_weather_data(request.destination)
-    if not weather_data:
-        raise HTTPException(status_code=404, detail="Weather data not found for destination")
-    
-    # Step 2: Construct prompt
-    weather_info = f"Destination: {weather_data['city']}, {weather_data['country']}. Forecast: Max {weather_data['temp_max']}°C, Min {weather_data['temp_min']}°C, Precipitation Probability: {weather_data['precip_prob']}%."
-    prompt = f"Act as a Travel Advisor. Based on the following destination and weather info, provide clothing and travel recommendations. Do NOT use asterisks for bolding. Instead, put the topic at the start of the line, followed by a relevant emoji, then the description. Use clear headings (using ###):\n\n{weather_info}"
-    
-    # Step 3: Ask Gemini
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-        advice = response.text
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI Agent error: {str(e)}")
-    
-    # Step 4: Return JSON
-    return {
-        "advice": advice,
-        "weather": weather_data
-    }
-
-@app.get("/weather/{city}")
-def get_weather_endpoint(city: str):
-    data = get_weather_data(city)
-    if not data:
-        raise HTTPException(status_code=404, detail="City not found")
-    return data
